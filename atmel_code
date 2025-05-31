@@ -1,0 +1,101 @@
+#define F_CPU 16000000UL
+
+#include <avr/io.h>
+#include <util/delay.h>
+#include <stdio.h>
+#include "lcd_i2c.h" // You must include a working I2C LCD library
+
+// Define threshold value for alcohol detection
+#define ALCOHOL_THRESHOLD 600
+
+// Function to initialize USART (Bluetooth)
+void USART_init(unsigned int ubrr) {
+	UBRR0H = (ubrr >> 8);                // Set baud rate high byte
+	UBRR0L = ubrr;                       // Set baud rate low byte
+	UCSR0B = (1 << TXEN0);              // Enable transmitter only
+	UCSR0C = (1 << UCSZ01) | (1 << UCSZ00); // 8-bit data frame
+}
+
+// Send a single character via USART
+void USART_send(char data) {
+	while (!(UCSR0A & (1 << UDRE0)));   // Wait until buffer is empty
+	UDR0 = data;                        // Load data into transmit buffer
+}
+
+// Send a string via USART
+void USART_print(const char* str) {
+	while (*str) {
+		USART_send(*str++);
+	}
+}
+
+// Initialize ADC (used for MQ-3 sensor)
+void ADC_init() {
+	ADMUX = (1 << REFS0);              // AVcc with external capacitor at AREF pin
+	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1); // Enable ADC, prescaler 64
+}
+
+// Read analog value from ADC0 (PC0)
+uint16_t ADC_read() {
+	ADMUX &= 0xF0;                     // Select ADC0 channel
+	ADCSRA |= (1 << ADSC);            // Start conversion
+	while (ADCSRA & (1 << ADSC));     // Wait until conversion completes
+	return ADC;                       // Return the 10-bit result
+}
+
+// Set up LED and buzzer pins
+void GPIO_init() {
+	DDRB |= (1 << PB0);               // PB0 ? Output for LED
+	DDRD |= (1 << PD7);               // PD7 ? Output for buzzer
+}
+
+int main(void) {
+	char buffer[16];                  // Buffer to store text to display/send
+	uint16_t sensorValue;             // Variable to store sensor reading
+
+	GPIO_init();                      // Initialize LED and buzzer
+	ADC_init();                       // Initialize ADC
+	USART_init(103);                  // 9600 baud for 16MHz ? UBRR = 103
+
+	lcd_init();                       // Initialize I2C LCD
+	lcd_backlight();                  // Turn on backlight
+
+	lcd_set_cursor(0, 0);
+	lcd_print("Alcohol Monitor");     // Startup message
+	_delay_ms(2000);
+	lcd_clear();
+
+	while (1) {
+		sensorValue = ADC_read();     // Read alcohol level from MQ-3 sensor
+
+		// Display sensor value on LCD
+		lcd_set_cursor(0, 0);
+		snprintf(buffer, 16, "Value: %4d", sensorValue);
+		lcd_print(buffer);
+
+		// Send sensor value over Bluetooth
+		USART_print("Alcohol Value: ");
+		snprintf(buffer, 16, "%d\r\n", sensorValue);
+		USART_print(buffer);
+
+		// Check if alcohol is detected
+		if (sensorValue > ALCOHOL_THRESHOLD) {
+			PORTB |= (1 << PB0);      // Turn ON LED
+			PORTD |= (1 << PD7);      // Turn ON buzzer
+
+			lcd_set_cursor(0, 1);
+			lcd_print("ALCOHOL DETECTED");
+
+			USART_print("ALERT: ALCOHOL DETECTED\r\n");
+			} else {
+			PORTB &= ~(1 << PB0);     // Turn OFF LED
+			PORTD &= ~(1 << PD7);     // Turn OFF buzzer
+
+			lcd_set_cursor(0, 1);
+			lcd_print("Status: Safe   ");
+			USART_print("Status: Safe\r\n");
+		}
+
+		_delay_ms(500);               // Wait for 500 ms before next reading
+	}
+}
